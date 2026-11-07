@@ -3892,6 +3892,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			break
 		}
 		hw.settle()
+		policyStop := from == provider.Responses && (hw.failMsg == codexMisalignmentCode ||
+			hw.status >= 400 && codexMisalignmentError(hw.held.Bytes()).Exists())
 		if hw.handedOver {
 			// its refusal came after its reasoning went to the agent: the
 			// next try's stream follows it as the same reply
@@ -3906,14 +3908,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		if hw.passing {
 			clientResponseID = call.Usage.ResponseID
 		}
-		if !hw.passing && !hw.refused && modelRetired(hw.code(), hw.errBody()) {
+		if !policyStop && !hw.passing && !hw.refused && modelRetired(hw.code(), hw.errBody()) {
 			// the vendor's list may still name it (OpenCode Zen's
 			// exo-free): it leaves the lists of this provider's models; a
 			// refusal is about the request, whatever it says (#3274)
 			provider.Retire(c.p.ID, c.model)
 		}
 		outgrew := false // a failure that didn't say so was the request's length
-		if !hw.passing && !hw.refused && hw.code() >= 400 {
+		if !policyStop && !hw.passing && !hw.refused && hw.code() >= 400 {
 			if req, err := parse(from, attemptBody); err == nil {
 				if msg, ok := tooLongUnsaid(c.p, c.model, estimate(req), s.heldOf(c.p.ID, c.model), hw.code(), hw.errBody()); ok {
 					// told as an overflow: not asked again, of this one or
@@ -4072,6 +4074,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			continue
 		}
 		watched.attempt(call, try, c.p.ID, sent, hw, capture)
+		if policyStop {
+			// The client needs the original error for its review. Its
+			// explanation must never trigger history repair or failover.
+			hw.release()
+			try.Fail = failPrompt
+			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+			break
+		}
 		if autoPicks(c) && repicked < 2 && !hw.passing && hw.code() == http.StatusBadRequest &&
 			(provider.CopilotRefusal(hw.errBody()) || wrongEndpoint(hw.code(), hw.errBody())) {
 			// Copilot refused the model its Auto picked, and Auto has
@@ -6324,6 +6334,17 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	res, err := s.forward(r.Context(), p, proto, path, p.Prepare(body), r.Header)
 	if err != nil {
 		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
+	}
+	if proto == provider.Responses && (res.StatusCode == http.StatusBadRequest || res.StatusCode == http.StatusForbidden) {
+		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+		res.Body.Close()
+		res.Body = io.NopCloser(bytes.NewReader(b))
+		if codexMisalignmentError(b).Exists() {
+			defer res.Body.Close()
+			u.RequestID = requestID(res.Header)
+			status, msg := passError(w, p, proto, proto, res, u)
+			return status, msg, true
+		}
 	}
 	if res.StatusCode == http.StatusBadRequest && (proto == provider.Chat || proto == provider.Gemini) && signaturesReach(p, proto, upstream) {
 		// a signature Google won't take (signatureRefused), one given

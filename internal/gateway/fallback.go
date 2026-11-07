@@ -1824,6 +1824,9 @@ func retryable(status int, body []byte) bool {
 	// the words are matched decoded, too (#1669)
 	body = wordsOf(body)
 	switch {
+	case codexMisalignmentError(raw).Exists():
+		// Only Codex can continue after the user reviews this stop.
+		return false
 	case overflowed(status, body):
 		// a conversation too long for the model is as long on every
 		// account of it: the agent is told, and compacts
@@ -3394,6 +3397,13 @@ func (h *holdWriter) release() {
 	}
 	if h.alive != nil && h.alive.sent && !h.stream {
 		h.passing = true
+		if h.status >= 400 && h.alive.proto == provider.Responses {
+			if e := codexMisalignmentError(h.held.Bytes()); e.Exists() {
+				h.w.Write(codexMisalignmentEvent(e.Raw))
+				h.flush()
+				return
+			}
+		}
 		switch {
 		case h.failure != 0:
 			// a 200 that is no reply of the protocol's (settle)
@@ -3891,6 +3901,11 @@ func streamEvent(ev []byte) (kind, status int, msg string) {
 		raw := v.Error
 		if len(v.Response.Error) > 0 && string(v.Response.Error) != "null" {
 			raw = v.Response.Error
+		}
+		if codexMisalignmentError(raw).Exists() {
+			// The request needs review. A new account or a retry cannot
+			// answer it, even if the explanation mentions a server fault.
+			return eventError, http.StatusBadRequest, codexMisalignmentCode
 		}
 		if len(raw) == 0 || string(raw) == "null" {
 			// Responses' own error event: its code and message on it

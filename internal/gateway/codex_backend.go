@@ -1603,7 +1603,7 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 // 503 it asks again for (TestCodexResetJudgedByTheBytesSent). A 429 is
 // the account's allowance or rate, which isn't outwaited in seconds.
 func codexBusy(status int, msg []byte) bool {
-	if status == http.StatusTooManyRequests || edgeSaidDrop(status, msg) || codexReset(status, msg) {
+	if status == http.StatusTooManyRequests || codexMisalignmentError(msg).Exists() || edgeSaidDrop(status, msg) || codexReset(status, msg) {
 		return false
 	}
 	return busy(status, msg)
@@ -1630,7 +1630,7 @@ func codexRouteUnmasked(on *provider.Provider) bool {
 // limited — what a turn through magpie's accounts goes on past to the
 // next. A 401 is never one: Codex renews its own sign-in on it.
 func codexAccountOut(status int, body []byte) bool {
-	if status == http.StatusUnauthorized {
+	if status == http.StatusUnauthorized || codexMisalignmentError(body).Exists() {
 		return false
 	}
 	if status == http.StatusForbidden && bytes.Contains(body, []byte("usage_not_included")) {
@@ -1761,6 +1761,9 @@ var unreadableItem = regexp.MustCompile(`(?i)(?:encrypted content for item|item 
 // (withoutSeals: a web search's too, #3887), or a member of Codex's
 // passthrough it doesn't know.
 func withoutUnreadable(body, msg []byte) ([]byte, bool) {
+	if codexMisalignmentError(msg).Exists() {
+		return nil, false
+	}
 	if f, ok := refusedPassthrough(msg); ok {
 		// a member of Codex's passthrough the backend doesn't know yet
 		// (passthrough_refused.go)

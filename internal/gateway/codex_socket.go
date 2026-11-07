@@ -356,7 +356,7 @@ func (t codexSocket) socket(req *http.Request, msg []byte) (*http.Response, erro
 				return res, nil
 			}
 		}
-		body.pending = append(body.pending, sseEvent(kind, frame)...)
+		body.pending = append(body.pending, codexSocketEvent(kind, frame)...)
 		if kind != "codex.rate_limits" && kind != "codex.response.metadata" {
 			break
 		}
@@ -372,6 +372,36 @@ func (t codexSocket) socket(req *http.Request, msg []byte) (*http.Response, erro
 		ContentLength: -1,
 		Request:       req,
 	}, nil
+}
+
+const codexMisalignmentCode = "misalignment_policy_violation"
+
+// codexMisalignmentError reads the upstream's reviewable error, either in
+// an HTTP or WebSocket envelope or as the error object from an SSE event.
+func codexMisalignmentError(body []byte) gjson.Result {
+	if e := gjson.GetBytes(body, "error"); e.Get("code").Str == codexMisalignmentCode {
+		return e
+	}
+	if gjson.GetBytes(body, "code").Str == codexMisalignmentCode {
+		return gjson.ParseBytes(body)
+	}
+	return gjson.Result{}
+}
+
+func codexMisalignmentEvent(raw string) []byte {
+	return sseEvent("response.failed", []byte(`{"type":"response.failed","response":{"status":"failed","error":`+raw+`}}`))
+}
+
+func codexSocketEvent(kind string, frame []byte) []byte {
+	// A wrapped WebSocket error can arrive after response.created, when
+	// the HTTP status is already chosen. Codex reads this policy code
+	// from response.failed on SSE. Keep the entire error for its review.
+	if kind == "error" {
+		if e := codexMisalignmentError(frame); e.Exists() {
+			return codexMisalignmentEvent(e.Raw)
+		}
+	}
+	return sseEvent(kind, frame)
 }
 
 // codexSocketEnded is the turn going over HTTP after the socket ended,
@@ -565,7 +595,7 @@ func (b *codexSocketBody) Read(p []byte) (int, error) {
 			continue
 		}
 		if frame != nil {
-			b.pending = sseEvent(gjson.GetBytes(frame, "type").String(), frame)
+			b.pending = codexSocketEvent(gjson.GetBytes(frame, "type").String(), frame)
 		}
 	}
 	n := copy(p, b.pending)
